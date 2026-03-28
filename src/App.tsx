@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo, Component, ReactNode } from 'react';
+import React, { useState, useEffect, useMemo, Component } from 'react';
 import { 
   Search, 
   HelpCircle, 
@@ -15,7 +15,7 @@ import {
   LayoutDashboard, 
   LogOut, 
   LogIn,
-  User,
+  User as UserIcon,
   ShieldCheck,
   FileText,
   Building2,
@@ -26,29 +26,15 @@ import {
   AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  collection, 
-  query, 
-  where, 
-  onSnapshot, 
-  addDoc, 
-  updateDoc, 
-  doc, 
-  getDocs,
-  orderBy,
-  Timestamp,
-  increment,
-  getDoc
-} from 'firebase/firestore';
-import { 
-  signInWithPopup, 
-  GoogleAuthProvider, 
-  onAuthStateChanged, 
-  signOut,
-  User as FirebaseUser
-} from 'firebase/auth';
-import { db, auth } from './firebase';
 import { Category, Question, UserSubmission, UserProfile } from './types';
+
+// --- Mock User Type ---
+interface MockUser {
+  uid: string;
+  email: string;
+  displayName: string;
+  photoURL: string;
+}
 
 // --- Error Boundary Component ---
 interface ErrorBoundaryProps {
@@ -96,152 +82,87 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   }
 }
 
-// --- Helper for Firestore Errors ---
-enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
+// --- Local Storage Helpers ---
+const STORAGE_KEYS = {
+  CATEGORIES: 'taxhelp_categories',
+  QUESTIONS: 'taxhelp_questions',
+  SUBMISSIONS: 'taxhelp_submissions',
+  USER: 'taxhelp_user'
+};
 
-function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
-  const errInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
-      emailVerified: auth.currentUser?.emailVerified,
-      isAnonymous: auth.currentUser?.isAnonymous,
-      tenantId: auth.currentUser?.tenantId,
-      providerInfo: auth.currentUser?.providerData.map(provider => ({
-        providerId: provider.providerId,
-        displayName: provider.displayName,
-        email: provider.email,
-        photoUrl: provider.photoURL
-      })) || []
-    },
-    operationType,
-    path
-  };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
-}
+const getLocalData = <T,>(key: string, defaultValue: T): T => {
+  const data = localStorage.getItem(key);
+  if (!data) return defaultValue;
+  try {
+    const parsed = JSON.parse(data);
+    // Convert date strings back to Date objects
+    return JSON.parse(data, (key, value) => {
+      if (key === 'createdAt' && typeof value === 'string') return new Date(value);
+      return value;
+    });
+  } catch (e) {
+    return defaultValue;
+  }
+};
+
+const setLocalData = <T,>(key: string, data: T): void => {
+  localStorage.setItem(key, JSON.stringify(data));
+};
 
 // --- Main Application ---
 export default function App() {
-  const [user, setUser] = useState<FirebaseUser | null>(null);
+  const [user, setUser] = useState<MockUser | null>(getLocalData(STORAGE_KEYS.USER, null));
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [questions, setQuestions] = useState<Question[]>([]);
-  const [submissions, setSubmissions] = useState<UserSubmission[]>([]);
+  const [categories, setCategories] = useState<Category[]>(getLocalData(STORAGE_KEYS.CATEGORIES, []));
+  const [questions, setQuestions] = useState<Question[]>(getLocalData(STORAGE_KEYS.QUESTIONS, []));
+  const [submissions, setSubmissions] = useState<UserSubmission[]>(getLocalData(STORAGE_KEYS.SUBMISSIONS, []));
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const [view, setView] = useState<'home' | 'category' | 'question' | 'ask' | 'admin' | 'status'>('home');
   const [activeQuestion, setActiveQuestion] = useState<Question | null>(null);
-  const [isAuthReady, setIsAuthReady] = useState(false);
 
-  // --- Auth Listener ---
+  // --- Sync Profile ---
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      setUser(currentUser);
-      if (currentUser) {
-        // Fetch user profile for role
-        try {
-          const userDoc = await getDoc(doc(db, 'users', currentUser.uid));
-          if (userDoc.exists()) {
-            setUserProfile(userDoc.data() as UserProfile);
-          } else {
-            // Default to user role if not found
-            const newProfile: UserProfile = {
-              uid: currentUser.uid,
-              email: currentUser.email || '',
-              role: currentUser.email === 'pzuhaidir@gmail.com' ? 'admin' : 'user'
-            };
-            setUserProfile(newProfile);
-          }
-        } catch (error) {
-          console.error("Error fetching user profile:", error);
-        }
-      } else {
-        setUserProfile(null);
-      }
-      setIsAuthReady(true);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  // --- Data Listeners ---
-  useEffect(() => {
-    if (!isAuthReady) return;
-
-    // Listen to Categories
-    const unsubCategories = onSnapshot(collection(db, 'categories'), (snapshot) => {
-      setCategories(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Category)));
-    }, (error) => handleFirestoreError(error, OperationType.LIST, 'categories'));
-
-    // Listen to Published Questions
-    const unsubQuestions = onSnapshot(
-      query(collection(db, 'questions'), where('isPublished', '==', true)),
-      (snapshot) => {
-        setQuestions(snapshot.docs.map(doc => ({ 
-          id: doc.id, 
-          ...doc.data(),
-          createdAt: (doc.data().createdAt as Timestamp).toDate()
-        } as Question)));
-      },
-      (error) => handleFirestoreError(error, OperationType.LIST, 'questions')
-    );
-
-    return () => {
-      unsubCategories();
-      unsubQuestions();
-    };
-  }, [isAuthReady]);
-
-  // --- Admin/User Submissions Listener ---
-  useEffect(() => {
-    if (!isAuthReady || !user) {
-      setSubmissions([]);
-      return;
-    }
-
-    let q;
-    if (userProfile?.role === 'admin') {
-      q = query(collection(db, 'submissions'), orderBy('createdAt', 'desc'));
+    if (user) {
+      setUserProfile({
+        uid: user.uid,
+        email: user.email,
+        role: user.email === 'pzuhaidir@gmail.com' ? 'admin' : 'user'
+      });
+      setLocalData(STORAGE_KEYS.USER, user);
     } else {
-      q = query(collection(db, 'submissions'), where('userEmail', '==', user.email), orderBy('createdAt', 'desc'));
+      setUserProfile(null);
+      localStorage.removeItem(STORAGE_KEYS.USER);
     }
+  }, [user]);
 
-    const unsubSubmissions = onSnapshot(q, (snapshot) => {
-      setSubmissions(snapshot.docs.map(doc => ({ 
-        id: doc.id, 
-        ...doc.data(),
-        createdAt: (doc.data().createdAt as Timestamp).toDate()
-      } as UserSubmission)));
-    }, (error) => handleFirestoreError(error, OperationType.LIST, 'submissions'));
+  // --- Sync Data ---
+  useEffect(() => {
+    setLocalData(STORAGE_KEYS.CATEGORIES, categories);
+  }, [categories]);
 
-    return () => unsubSubmissions();
-  }, [isAuthReady, user, userProfile]);
+  useEffect(() => {
+    setLocalData(STORAGE_KEYS.QUESTIONS, questions);
+  }, [questions]);
+
+  useEffect(() => {
+    setLocalData(STORAGE_KEYS.SUBMISSIONS, submissions);
+  }, [submissions]);
 
   // --- Auth Actions ---
-  const handleLogin = async () => {
-    try {
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-    } catch (error) {
-      console.error("Login failed:", error);
-    }
+  const handleLogin = () => {
+    const mockUser: MockUser = {
+      uid: 'mock-uid-' + Math.random().toString(36).substr(2, 9),
+      email: 'pzuhaidir@gmail.com', // Default to admin for demo purposes
+      displayName: 'Demo User',
+      photoURL: 'https://picsum.photos/seed/user/200'
+    };
+    setUser(mockUser);
   };
 
-  const handleLogout = async () => {
-    try {
-      await signOut(auth);
-      setView('home');
-    } catch (error) {
-      console.error("Logout failed:", error);
-    }
+  const handleLogout = () => {
+    setUser(null);
+    setView('home');
   };
 
   // --- Search Logic ---
@@ -368,7 +289,7 @@ export default function App() {
           >
             <div className="bg-blue-50 w-12 h-12 rounded-xl flex items-center justify-center mb-4 group-hover:bg-blue-600 transition-colors">
               {/* Dynamic Icon Rendering */}
-              {cat.icon === 'User' && <User className="w-6 h-6 text-blue-600 group-hover:text-white" />}
+              {cat.icon === 'User' && <UserIcon className="w-6 h-6 text-blue-600 group-hover:text-white" />}
               {cat.icon === 'Building2' && <Building2 className="w-6 h-6 text-blue-600 group-hover:text-white" />}
               {cat.icon === 'Receipt' && <Receipt className="w-6 h-6 text-blue-600 group-hover:text-white" />}
               {cat.icon === 'CalendarDays' && <CalendarDays className="w-6 h-6 text-blue-600 group-hover:text-white" />}
@@ -506,15 +427,17 @@ export default function App() {
 
       setIsSubmitting(true);
       try {
-        await addDoc(collection(db, 'submissions'), {
+        const newSubmission: UserSubmission = {
+          id: 'sub-' + Math.random().toString(36).substr(2, 9),
           userEmail: email,
           questionText: question,
           status: 'pending',
-          createdAt: Timestamp.now()
-        });
+          createdAt: new Date()
+        };
+        setSubmissions(prev => [newSubmission, ...prev]);
         setSuccess(true);
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, 'submissions');
+        console.error("Submission failed:", error);
       } finally {
         setIsSubmitting(false);
       }
@@ -611,7 +534,7 @@ export default function App() {
       
       {!user ? (
         <div className="bg-white p-12 rounded-3xl border border-gray-100 shadow-xl text-center">
-          <User className="w-16 h-16 text-gray-200 mx-auto mb-4" />
+          <UserIcon className="w-16 h-16 text-gray-200 mx-auto mb-4" />
           <h2 className="text-xl font-bold text-gray-900 mb-2">Sign in to track your requests</h2>
           <p className="text-gray-500 mb-6">You need to be logged in to see the status of your submitted questions.</p>
           <button onClick={handleLogin} className="bg-blue-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-blue-700 transition-all">Sign In with Google</button>
@@ -664,32 +587,32 @@ export default function App() {
       if (!editingSub || !answer || !catId) return;
       try {
         // 1. Create official question
-        await addDoc(collection(db, 'questions'), {
+        const newQuestion: Question = {
+          id: 'q-' + Math.random().toString(36).substr(2, 9),
           categoryId: catId,
           questionText: editingSub.questionText,
           answerBody: answer,
           isPublished: true,
           viewCount: 0,
-          createdAt: Timestamp.now()
-        });
+          createdAt: new Date()
+        };
+        setQuestions(prev => [newQuestion, ...prev]);
+
         // 2. Update submission status
-        await updateDoc(doc(db, 'submissions', editingSub.id), {
-          status: 'answered'
-        });
+        setSubmissions(prev => prev.map(s => s.id === editingSub.id ? { ...s, status: 'answered' } : s));
+        
         setEditingSub(null);
         setAnswer('');
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, 'questions');
+        console.error("Approval failed:", error);
       }
     };
 
     const handleReject = async (id: string) => {
       try {
-        await updateDoc(doc(db, 'submissions', id), {
-          status: 'rejected'
-        });
+        setSubmissions(prev => prev.map(s => s.id === id ? { ...s, status: 'rejected' } : s));
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, 'submissions');
+        console.error("Rejection failed:", error);
       }
     };
 
@@ -706,48 +629,39 @@ export default function App() {
 
     const handleSeedData = async () => {
       try {
-        const cats = [
-          { name: 'Individual Tax', icon: 'User' },
-          { name: 'Corporate Tax', icon: 'Building2' },
-          { name: 'VAT / GST', icon: 'Receipt' },
-          { name: 'Deadlines', icon: 'CalendarDays' }
+        const cats: Category[] = [
+          { id: 'cat-1', name: 'Individual Tax', icon: 'User' },
+          { id: 'cat-2', name: 'Corporate Tax', icon: 'Building2' },
+          { id: 'cat-3', name: 'VAT / GST', icon: 'Receipt' },
+          { id: 'cat-4', name: 'Deadlines', icon: 'CalendarDays' }
         ];
 
-        for (const cat of cats) {
-          await addDoc(collection(db, 'categories'), cat);
-        }
-
-        const sampleQuestions = [
+        const sampleQuestions: Question[] = [
           {
-            categoryId: '', // Will need to map these after cat creation if I wanted to be precise, but for seeding I'll just add them to the first cat
+            id: 'q-1',
+            categoryId: 'cat-1',
             questionText: 'What are the common deductions for individuals?',
             answerBody: 'Common deductions include mortgage interest, state and local taxes, charitable contributions, and medical expenses exceeding a certain percentage of your AGI.',
             isPublished: true,
             viewCount: 120,
-            createdAt: Timestamp.now()
+            createdAt: new Date()
           },
           {
-            categoryId: '',
+            id: 'q-2',
+            categoryId: 'cat-2',
             questionText: 'When is the corporate tax filing deadline?',
             answerBody: 'For most C-Corporations, the deadline is the 15th day of the 4th month following the close of the tax year (April 15th for calendar year corporations).',
             isPublished: true,
             viewCount: 85,
-            createdAt: Timestamp.now()
+            createdAt: new Date()
           }
         ];
 
-        // Get the newly created categories to assign IDs
-        const catSnapshot = await getDocs(collection(db, 'categories'));
-        const catDocs = catSnapshot.docs.map(d => ({ id: d.id, ...d.data() } as Category));
-
-        if (catDocs.length > 0) {
-          await addDoc(collection(db, 'questions'), { ...sampleQuestions[0], categoryId: catDocs[0].id });
-          await addDoc(collection(db, 'questions'), { ...sampleQuestions[1], categoryId: catDocs[1].id });
-        }
-
+        setCategories(cats);
+        setQuestions(sampleQuestions);
         alert('Data seeded successfully!');
       } catch (error) {
-        handleFirestoreError(error, OperationType.WRITE, 'seed');
+        console.error("Seeding failed:", error);
       }
     };
 
