@@ -1,0 +1,93 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: categories
+    // Fields:
+    //   - name: string (required)
+    //   - icon: string (required)
+    //
+    // Collection: questions
+    // Fields:
+    //   - categoryId: string (required)
+    //   - questionText: string (required)
+    //   - answerBody: string (required)
+    //   - isPublished: bool (required)
+    //   - viewCount: number (required)
+    //   - createdAt: timestamp (required)
+    //
+    // Collection: submissions
+    // Fields:
+    //   - userEmail: string (required)
+    //   - questionText: string (required)
+    //   - status: string (required, enum: ['pending', 'answered', 'rejected'])
+    //   - createdAt: timestamp (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         (request.auth.token.email == "pzuhaidir@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidCategory(data) {
+      return data.keys().hasAll(['name', 'icon']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.icon is string && data.icon.size() > 0 && data.icon.size() < 50;
+    }
+
+    function isValidQuestion(data) {
+      return data.keys().hasAll(['categoryId', 'questionText', 'answerBody', 'isPublished', 'viewCount', 'createdAt']) &&
+             data.categoryId is string &&
+             data.questionText is string && data.questionText.size() > 0 && data.questionText.size() < 1000 &&
+             data.answerBody is string && data.answerBody.size() > 0 && data.answerBody.size() < 5000 &&
+             data.isPublished is bool &&
+             data.viewCount is number && data.viewCount >= 0 &&
+             data.createdAt is timestamp;
+    }
+
+    function isValidSubmission(data) {
+      return data.keys().hasAll(['userEmail', 'questionText', 'status', 'createdAt']) &&
+             data.userEmail is string && data.userEmail.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$") &&
+             data.questionText is string && data.questionText.size() > 0 && data.questionText.size() < 1000 &&
+             data.status in ['pending', 'answered', 'rejected'] &&
+             data.createdAt is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /categories/{categoryId} {
+      allow read: if true; // Categories are public
+      allow write: if isAdmin() && isValidCategory(request.resource.data);
+    }
+
+    match /questions/{questionId} {
+      allow read: if resource.data.isPublished == true || isAdmin();
+      allow write: if isAdmin() && isValidQuestion(request.resource.data);
+    }
+
+    match /submissions/{submissionId} {
+      allow read: if isAdmin() || (isAuthenticated() && request.auth.token.email == resource.data.userEmail);
+      allow create: if isValidSubmission(request.resource.data);
+      allow update: if isAdmin() && isValidSubmission(request.resource.data);
+      allow delete: if isAdmin();
+    }
+
+    match /users/{userId} {
+      allow read, write: if request.auth.uid == userId || isAdmin();
+    }
+  }
+}
